@@ -1,0 +1,398 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "CloudLabs Lab 01 (Cisco IOS XE Routing - EIGRP, BGP, IPv6 & NTP). Deploys three Cisco Catalyst 8000V PAYG routers (R1/R2/R3) and one Ubuntu jump/validation host. PAYG billing means NO separate Cisco license is required - the DNA Essentials software charge is metered through Azure Marketplace per VM-hour. Marketplace legal terms must be accepted once per subscription before first deployment: az vm image terms accept --publisher cisco --offer cisco-c8000v-payg --plan <sku>. NOTE: sku string confirmed working via manual deployment on 2026-07-15 is '17_18_payg-essentials' (underscore before 'payg') - the previously used '17_18-payg-essentials' (hyphen) returned MarketplacePurchaseEligibilityFailed / offer not found."
+  },
+  "parameters": {
+    "deploymentId": {
+      "type": "string",
+      "metadata": { "description": "CloudLabs deployment id suffix, e.g. 123456. Used in all resource names." }
+    },
+    "adminUsername": {
+      "type": "string",
+      "defaultValue": "labadmin",
+      "metadata": { "description": "Admin username for the three C8000V routers. Azure waagent integration creates this as a priv-15 IOS user; validators SSH with it." }
+    },
+    "adminPassword": {
+      "type": "securestring",
+      "metadata": { "description": "Admin password for the routers and the jump host." }
+    },
+    "jumpAdminUsername": {
+      "type": "string",
+      "defaultValue": "azureuser",
+      "metadata": { "description": "Admin username for the Ubuntu jump/validation host." }
+    },
+    "c8000vSku": {
+      "type": "string",
+      "defaultValue": "17_18_payg-essentials",
+      "metadata": { "description": "Marketplace SKU (plan) of the C8000V PAYG image. Confirmed working: 17_18_payg-essentials (underscore before 'payg')" }
+    },
+    "c8000vVersion": {
+      "type": "string",
+      "defaultValue": "latest",
+      "metadata": { "description": "Image version. 'latest' recommended; pin for reproducibility if the client requires it." }
+    },
+    "routerVmSize": {
+      "type": "string",
+      "defaultValue": "Standard_D8s_v5",
+      "metadata": { "description": "VM size for R1/R2 (2 NICs)" }
+    },
+    "routerMultiNicVmSize": {
+      "type": "string",
+      "defaultValue": "Standard_D8s_v5",
+      "metadata": { "description": "VM size for R3, which carries a third NIC for the IPv6 multi-interface scenario." }
+    },
+    "jumpVmSize": {
+      "type": "string",
+      "defaultValue": "Standard_D2as_v5",
+      "metadata": { "description": "VM size for the Ubuntu jump/validation host." }
+    },
+    "artifactsLocation": {
+      "type": "string",
+      "defaultValue": "https://experienceazure.blob.core.windows.net/templates/microland/DNS-Cisco-Routing-Assesment1/bootstrap-01.sh"
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": { "description": "Azure region for all resources." }
+    },
+    "ODLID": {"type": "string"},
+    "azureUserName": {"type": "string"},
+    "azurePassword": { "type": "securestring"},
+    "trainerUserName": {"type": "string"},
+    "trainerUserPassword": {"type": "string"}
+  },
+  "variables": {
+    "vnetName": "[concat('labvnet-', parameters('deploymentId'))]",
+    "jumpVmName": "[concat('labvm-', parameters('deploymentId'))]",
+    "nsgName": "[concat('labnsg-', parameters('deploymentId'))]",
+    "addressSpace": "10.0.0.0/16",
+    "AzureSubscriptionID": "[subscription().subscriptionId]",
+    "AzureTenantID": "[subscription().tenantId]",
+    "publicIpAddressDNSName": "[concat('labvm', uniqueString(resourceGroup().id))]",
+    "cloudlabsCommon": "[concat(' -AzureUserName ', parameters('azureUserName'), ' -AzurePassword ', parameters('azurePassword'), ' -AzureTenantID ', variables('AzureTenantID'), ' -AzureSubscriptionID ', variables('AzureSubscriptionID'), ' -odlId ', parameters('ODLID'), ' -DeploymentID ', parameters('DeploymentID'))]",
+    "mgmtSubnet": { "name": "mgmt", "prefix": "10.0.0.0/24" },
+    "coreSubnet": { "name": "core", "prefix": "10.0.1.0/24" },
+    "edgeSubnet": { "name": "edge", "prefix": "10.0.2.0/24" },
+    "jumpIp": "10.0.0.10",
+    "routers": [
+      {
+        "name": "R1",
+        "mgmtIp": "10.0.0.11",
+        "coreIp": "10.0.1.11",
+        "loopback": "1.1.1.1",
+        "size": "[parameters('routerVmSize')]",
+        "thirdNic": false
+      },
+      {
+        "name": "R2",
+        "mgmtIp": "10.0.0.12",
+        "coreIp": "10.0.1.12",
+        "loopback": "2.2.2.2",
+        "size": "[parameters('routerVmSize')]",
+        "thirdNic": false
+      },
+      {
+        "name": "R3",
+        "mgmtIp": "10.0.0.13",
+        "coreIp": "10.0.1.13",
+        "edgeIp": "10.0.2.13",
+        "loopback": "3.3.3.3",
+        "size": "[parameters('routerMultiNicVmSize')]",
+        "thirdNic": true
+      }
+    ],
+    "c8000vPlan": {
+      "name": "[parameters('c8000vSku')]",
+      "publisher": "cisco",
+      "product": "cisco-c8000v-payg"
+    },
+    "ubuntuImage": {
+      "publisher": "Canonical",
+      "offer": "0001-com-ubuntu-server-jammy",
+      "sku": "22_04-lts-gen2",
+      "version": "latest"
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Network/networkSecurityGroups",
+      "apiVersion": "2023-09-01",
+      "name": "[variables('nsgName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "securityRules": [
+          {
+            "name": "Allow-SSH-Inbound",
+            "properties": {
+              "priority": 1000,
+              "direction": "Inbound",
+              "access": "Allow",
+              "protocol": "Tcp",
+              "sourceAddressPrefix": "*",
+              "sourcePortRange": "*",
+              "destinationAddressPrefix": "*",
+              "destinationPortRange": "22"
+            }
+          },
+          {
+            "name": "Allow-Intra-VNet",
+            "properties": {
+              "priority": 1100,
+              "direction": "Inbound",
+              "access": "Allow",
+              "protocol": "*",
+              "sourceAddressPrefix": "VirtualNetwork",
+              "sourcePortRange": "*",
+              "destinationAddressPrefix": "VirtualNetwork",
+              "destinationPortRange": "*"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Network/virtualNetworks",
+      "apiVersion": "2023-09-01",
+      "name": "[variables('vnetName')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]"
+      ],
+      "properties": {
+        "addressSpace": { "addressPrefixes": [ "[variables('addressSpace')]" ] },
+        "subnets": [
+          {
+            "name": "[variables('mgmtSubnet').name]",
+            "properties": {
+              "addressPrefix": "[variables('mgmtSubnet').prefix]",
+              "networkSecurityGroup": { "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]" }
+            }
+          },
+          {
+            "name": "[variables('coreSubnet').name]",
+            "properties": { "addressPrefix": "[variables('coreSubnet').prefix]" }
+          },
+          {
+            "name": "[variables('edgeSubnet').name]",
+            "properties": { "addressPrefix": "[variables('edgeSubnet').prefix]" }
+          }
+        ]
+      }
+    },
+    {
+      "copy": { "name": "routerPips", "count": "[length(variables('routers'))]" },
+      "type": "Microsoft.Network/publicIPAddresses",
+      "apiVersion": "2023-09-01",
+      "name": "[concat('pip-', variables('routers')[copyIndex()].name, '-', parameters('deploymentId'))]",
+      "location": "[parameters('location')]",
+      "sku": { "name": "Standard" },
+      "properties": { "publicIPAllocationMethod": "Static" }
+    },
+    {
+      "type": "Microsoft.Network/publicIPAddresses",
+      "apiVersion": "2023-09-01",
+      "name": "[concat('pip-jump-', parameters('deploymentId'))]",
+      "location": "[parameters('location')]",
+      "sku": { "name": "Standard" },
+      "properties": { "publicIPAllocationMethod": "Static",
+                      "dnsSettings": {
+                        "domainNameLabel": "[variables('publicIpAddressDNSName')]"
+                        } 
+                    }
+    },
+    {
+      "copy": { "name": "routerMgmtNics", "count": "[length(variables('routers'))]" },
+      "type": "Microsoft.Network/networkInterfaces",
+      "apiVersion": "2023-09-01",
+      "name": "[concat('nic-', variables('routers')[copyIndex()].name, '-mgmt-', parameters('deploymentId'))]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]",
+        "routerPips"
+      ],
+      "properties": {
+        "enableIPForwarding": true,
+        "ipConfigurations": [
+          {
+            "name": "ipconfig1",
+            "properties": {
+              "privateIPAllocationMethod": "Static",
+              "privateIPAddress": "[variables('routers')[copyIndex()].mgmtIp]",
+              "subnet": { "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('vnetName'), variables('mgmtSubnet').name)]" },
+              "publicIPAddress": { "id": "[resourceId('Microsoft.Network/publicIPAddresses', concat('pip-', variables('routers')[copyIndex()].name, '-', parameters('deploymentId')))]" }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "copy": { "name": "routerCoreNics", "count": "[length(variables('routers'))]" },
+      "type": "Microsoft.Network/networkInterfaces",
+      "apiVersion": "2023-09-01",
+      "name": "[concat('nic-', variables('routers')[copyIndex()].name, '-core-', parameters('deploymentId'))]",
+      "location": "[parameters('location')]",
+      "dependsOn": [ "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]" ],
+      "properties": {
+        "enableIPForwarding": true,
+        "ipConfigurations": [
+          {
+            "name": "ipconfig1",
+            "properties": {
+              "privateIPAllocationMethod": "Static",
+              "privateIPAddress": "[variables('routers')[copyIndex()].coreIp]",
+              "subnet": { "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('vnetName'), variables('coreSubnet').name)]" }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Network/networkInterfaces",
+      "apiVersion": "2023-09-01",
+      "name": "[concat('nic-R3-edge-', parameters('deploymentId'))]",
+      "location": "[parameters('location')]",
+      "dependsOn": [ "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]" ],
+      "properties": {
+        "enableIPForwarding": true,
+        "ipConfigurations": [
+          {
+            "name": "ipconfig1",
+            "properties": {
+              "privateIPAllocationMethod": "Static",
+              "privateIPAddress": "10.0.2.13",
+              "subnet": { "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('vnetName'), variables('edgeSubnet').name)]" }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "copy": { "name": "routerVms", "count": "[length(variables('routers'))]" },
+      "type": "Microsoft.Compute/virtualMachines",
+      "apiVersion": "2023-09-01",
+      "name": "[concat(variables('routers')[copyIndex()].name, '-', parameters('deploymentId'))]",
+      "location": "[parameters('location')]",
+      "plan": "[variables('c8000vPlan')]",
+      "dependsOn": [
+        "routerMgmtNics",
+        "routerCoreNics",
+        "[resourceId('Microsoft.Network/networkInterfaces', concat('nic-R3-edge-', parameters('deploymentId')))]"
+      ],
+      "properties": {
+        "hardwareProfile": { "vmSize": "[variables('routers')[copyIndex()].size]" },
+        "storageProfile": {
+          "imageReference": {
+            "publisher": "cisco",
+            "offer": "cisco-c8000v-payg",
+            "sku": "[parameters('c8000vSku')]",
+            "version": "[parameters('c8000vVersion')]"
+          },
+          "osDisk": { "createOption": "FromImage", "managedDisk": { "storageAccountType": "Premium_LRS" } }
+        },
+        "osProfile": {
+          "computerName": "[variables('routers')[copyIndex()].name]",
+          "adminUsername": "[parameters('adminUsername')]",
+          "adminPassword": "[parameters('adminPassword')]",
+          "customData": "[base64(concat('Section: IOS configuration\n', 'hostname ', variables('routers')[copyIndex()].name, '\n', 'interface Loopback0\n', ' description Lab loopback - advertise this in the routing scenarios\n', ' ip address ', variables('routers')[copyIndex()].loopback, ' 255.255.255.255\n', 'ip ssh version 2\n', 'ip domain name lab.local\n'))]"
+        },
+        "networkProfile": {
+          "copy": [
+            {
+              "name": "networkInterfaces",
+              "count": "[if(variables('routers')[copyIndex()].thirdNic, 3, 2)]",
+              "input": {
+                "id": "[resourceId('Microsoft.Network/networkInterfaces', concat('nic-', variables('routers')[copyIndex()].name, if(equals(copyIndex('networkInterfaces'), 0), '-mgmt-', if(equals(copyIndex('networkInterfaces'), 1), '-core-', '-edge-')), parameters('deploymentId')))]",
+                "properties": { "primary": "[equals(copyIndex('networkInterfaces'), 0)]" }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Network/networkInterfaces",
+      "apiVersion": "2023-09-01",
+      "name": "[concat('nic-jump-', parameters('deploymentId'))]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]",
+        "[resourceId('Microsoft.Network/publicIPAddresses', concat('pip-jump-', parameters('deploymentId')))]"
+      ],
+      "properties": {
+        "ipConfigurations": [
+          {
+            "name": "ipconfig1",
+            "properties": {
+              "privateIPAllocationMethod": "Static",
+              "privateIPAddress": "[variables('jumpIp')]",
+              "subnet": { "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('vnetName'), variables('mgmtSubnet').name)]" },
+              "publicIPAddress": { "id": "[resourceId('Microsoft.Network/publicIPAddresses', concat('pip-jump-', parameters('deploymentId')))]" }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines",
+      "apiVersion": "2023-09-01",
+      "name": "[variables('jumpVmName')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [ "[resourceId('Microsoft.Network/networkInterfaces', concat('nic-jump-', parameters('deploymentId')))]" ],
+      "properties": {
+        "hardwareProfile": { "vmSize": "[parameters('jumpVmSize')]" },
+        "storageProfile": {
+          "imageReference": "[variables('ubuntuImage')]",
+          "osDisk": { "createOption": "FromImage", "managedDisk": { "storageAccountType": "Standard_LRS" } }
+        },
+        "osProfile": {
+          "computerName": "[variables('jumpVmName')]",
+          "adminUsername": "[parameters('jumpAdminUsername')]",
+          "adminPassword": "[parameters('adminPassword')]"
+        },
+        "networkProfile": {
+          "networkInterfaces": [
+            { "id": "[resourceId('Microsoft.Network/networkInterfaces', concat('nic-jump-', parameters('deploymentId')))]" }
+          ]
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines/extensions",
+      "apiVersion": "2023-09-01",
+      "name": "[concat(variables('jumpVmName'), '/bootstrap')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [ "[resourceId('Microsoft.Compute/virtualMachines', variables('jumpVmName'))]" ],
+      "properties": {
+        "publisher": "Microsoft.Azure.Extensions",
+        "type": "CustomScript",
+        "typeHandlerVersion": "2.1",
+        "autoUpgradeMinorVersion": true,
+        "settings": {
+          "fileUris": [
+            "[parameters('artifactsLocation')]"
+          ]
+        },
+        "protectedSettings": {
+          "commandToExecute": "[concat('bash bootstrap-01.sh ', parameters('jumpAdminUsername'), ' ', parameters('adminUsername'), ' ', parameters('adminPassword'))]"
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "jumpHostPublicIp": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Network/publicIPAddresses', concat('pip-jump-', parameters('deploymentId')))).ipAddress]"
+    },
+    "DeploymentID": {"type": "string","value": "[parameters('deploymentId')]"},
+    "RouterAdminUsername": {"type": "string","value": "[parameters('adminUsername')]"},
+    "LabVM Name": {"type": "string","value": "[parameters('jumpAdminUsername')]"},
+    "JumpHostPublicIP": {"type": "string","value": "[reference(resourceId('Microsoft.Network/publicIPAddresses', concat('pip-jump-', parameters('deploymentId')))).ipAddress]"},
+    "DNS Name": {"type": "string","value": "[reference(resourceId('Microsoft.Network/publicIPAddresses', concat('pip-jump-', parameters('deploymentId')))).dnsSettings.fqdn]"},
+    "R1ManagementIP": {"type": "string","value": "10.0.0.11"},
+    "R2ManagementIP": {"type": "string","value": "10.0.0.12"},
+    "R3ManagementIP": {"type": "string","value": "10.0.0.13"},
+    "LabVM Password": {"type": "string","value": "[parameters('adminPassword')]"}
+  }
+}
