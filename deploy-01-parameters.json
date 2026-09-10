@@ -1,0 +1,21 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "deploymentId": { "value": "GET-DEPLOYMENT-ID" },
+    "adminUsername": { "value": "labadmin" },
+    "adminPassword": { "value": "Mypassword1!" },
+    "ODLID": { "value": "GET-ODLID" },
+    "azureUserName": { "value": "GET-AZUSER-USERNAME" },
+    "azurePassword": { "value": "GET-AZUSER-PASSWORD" },
+    "trainerUserName": { "value": "trainer" },
+    "trainerUserPassword": { "value": "TrainerPassword123!"},
+    "jumpAdminUsername": { "value": "azureuser" },
+    "c8000vSku": { "value": "17_18_payg-essentials" },
+    "c8000vVersion": { "value": "latest" },
+    "routerVmSize": { "value": "Standard_D8s_v5" },
+    "routerMultiNicVmSize": { "value": "Standard_D8s_v5" },
+    "jumpVmSize": { "value": "Standard_D2as_v5" },
+    "artifactsLocation": { "value": "https://experienceazure.blob.core.windows.net/templates/microland/DNS-Cisco-Routing-Assesment1/bootstrap-01.sh" }
+  }
+}
